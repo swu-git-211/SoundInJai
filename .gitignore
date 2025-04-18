@@ -1,5 +1,8 @@
 .streamlit/secrets.toml
 
+# ไม่ต้องเก็บไฟล์ไดอารี่ลง repo
+diary_records.csv
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
