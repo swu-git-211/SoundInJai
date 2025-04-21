@@ -3,174 +3,180 @@ import pandas as pd
 import calendar
 from datetime import datetime, timedelta
 import os
-from collections import Counter
+import uuid
 from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 
-# ─── CONFIG ────────────────────────────────────────────────────────────────────
+# ─── CONFIG ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="เสียงในใจ — Mood Diary", layout="wide")
 DATA_FILE = "diary_records.csv"
-EMOJI_MAP = {
-    "pos": "😊",
-    "neu": "😐",
-    "neg": "😢",
-}
-EMOJI_OPTIONS = list(EMOJI_MAP.values())
+EMOJI_MAP = {"pos": "😊", "neu": "😐", "neg": "😢"}
 
-st.markdown(
-    """
-    <style>
-        .stApp {
-            background-color: #5AC8B8; /* สีเขียวมิ้นฟ้าเข้มๆ เหมือนไอติม */
-        }
-        .block-container {
-            background-color: #A0E1D7; /* สีอ่อนตัดกัน */
-            padding: 2rem;
-            border-radius: 1rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True
-)
-
-
-
-
-
-# ─── LOAD MODEL ─────────────────────────────────────────────────────────────────
-@st.cache_resource(show_spinner=False)
-def load_pipeline():
+# ─── MODEL ──────────────────────────────────────────────────────────
+@st.cache_resource
+def load_pipe():
     model_name = "phoner45/wangchan-sentiment-thai-text-model"
     tok = AutoTokenizer.from_pretrained(model_name)
     mdl = AutoModelForSequenceClassification.from_pretrained(model_name)
     return pipeline("text-classification", model=mdl, tokenizer=tok)
 
-sentiment_pipe = load_pipeline()
+sentiment_pipe = load_pipe()
 
-# ─── HELPERS ────────────────────────────────────────────────────────────────────
 def analyze_sentiment(text: str):
-    r = sentiment_pipe(text)[0]
-    return r["label"], r["score"]
+    out = sentiment_pipe(text)[0]
+    label = out["label"].lower()
+    if label.startswith("pos"):
+        label = "pos"
+    elif label.startswith("neg"):
+        label = "neg"
+    else:
+        label = "neu"
+    return label, out["score"]
 
+# ─── DATA ──────────────────────────────────────────────────────────
 def load_data():
     if not os.path.exists(DATA_FILE):
-        pd.DataFrame(columns=["date","text","sentiment","score","emoji"]) \
-          .to_csv(DATA_FILE, index=False)
+        pd.DataFrame(columns=["id", "date", "text", "sentiment", "score", "emoji"]) \
+            .to_csv(DATA_FILE, index=False)
+
     df = pd.read_csv(DATA_FILE)
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"]).set_index("date").sort_index()
-    df["emoji"] = df["sentiment"].map(EMOJI_MAP).fillna("")
+    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+    df["score"] = pd.to_numeric(df["score"], errors="coerce").fillna(0.0)
+    if "id" not in df.columns:
+        df["id"] = [str(uuid.uuid4()) for _ in range(len(df))]
+    else:
+        df["id"] = df["id"].fillna("").apply(lambda x: str(uuid.uuid4()) if x == "" else x)
     return df
 
-def save_entry(date, text, sentiment, score, emoji=None):
-    df = load_data().reset_index()
-    if emoji is None:
-        emoji = EMOJI_MAP.get(sentiment, "")
-    same_day = df["date"].dt.date == date
-    if same_day.any():
-        df.loc[same_day, ["text","sentiment","score","emoji"]] = [
-            text, sentiment, score, emoji
-        ]
+def save_entry(date, text, sentiment, score, emoji):
+    df = load_data()
+    mask = df["date"] == date
+    if mask.any():
+        idx = df[mask].index[0]
+        df.loc[idx, ["text", "sentiment", "score", "emoji"]] = [text, sentiment, score, emoji]
     else:
         df.loc[len(df)] = {
-            "date":      date,
-            "text":      text,
+            "id": str(uuid.uuid4()),
+            "date": date,
+            "text": text,
             "sentiment": sentiment,
-            "score":     score,
-            "emoji":     emoji
+            "score": score,
+            "emoji": emoji
         }
     df.to_csv(DATA_FILE, index=False)
 
-# ─── LAYOUT ────────────────────────────────────────────────────────────────────
-st.title("🧠 เสียงในใจ — Mood Diary w/ Edit Emoji")
+def delete_entry(eid):
+    df = load_data()
+    df = df[df["id"] != eid]
+    df.to_csv(DATA_FILE, index=False)
 
-col1, col2 = st.columns([1,2])
+if st.query_params.get("scroll") == "edit":
+    st.write('<script>window.scrollTo(0, document.body.scrollHeight);</script>', unsafe_allow_html=True)
+    st.query_params.clear()  # reset query params
 
-# Left: Entry
+def toggle_edit(rid):
+    if st.session_state.get("edit_id") == rid:
+        st.session_state.edit_id = None
+    else:
+        st.session_state.edit_id = rid
+        st.query_params["scroll"] = "edit"
+
+# ─── UI ─────────────────────────────────────────────────────────────
+st.title("🧠 เสียงในใจ — Mood Diary")
+df = load_data()
+col1, col2 = st.columns([1, 2])
+
+if "entry_date" not in st.session_state:
+    st.session_state.entry_date = datetime.now().date()
+
+if "entry_text" not in st.session_state:
+    st.session_state.entry_text = ""
+
+# ─── LEFT ───────────────────────────────────────────────────────────
 with col1:
-    entry_date = st.date_input("วันที่", datetime.now().date())
-    diary_text = st.text_area("บันทึกความรู้สึก…", height=200)
-    if st.button("💾 บันทึกและวิเคราะห์"):
-        if diary_text.strip():
-            sent, score = analyze_sentiment(diary_text)
-            save_entry(entry_date, diary_text, sent, score)
-            st.success(f"🔔 {EMOJI_MAP[sent]} บันทึกเรียบร้อย! ({sent.upper()} {score:.0%})")
+    st.subheader("✍️ เขียนไดอารี่")
+    entry_date = st.date_input(
+        "วันที่",
+        value=st.session_state.get("entry_date", datetime.now().date()),
+        key="entry_date"
+    )
+    existing = df[df["date"] == entry_date]
+    default_text = existing.iloc[0]["text"] if not existing.empty else ""
+    entry_text = st.text_area(
+        "บันทึกความรู้สึก…", 
+        value=st.session_state.get("entry_text", default_text), 
+        height=200,
+        key="entry_text"
+    )
 
-             
-              # 🔸 ข้อความให้กำลังใจถ้าเศร้า
-        if sent == "neg":
-            st.info("⚡ วันนี้อาจจะไม่ดีนัก ลองพักผ่อน ฟังเพลงที่ชอบ หรือคุยกับเพื่อนดูนะครับ 💙")
+    def on_new_save():
+        if st.session_state.entry_text.strip():
+            lab, sc = analyze_sentiment(st.session_state.entry_text)
+            em = EMOJI_MAP[lab]
+            save_entry(entry_date, st.session_state.entry_text, lab, sc, em)
+            st.success(f"{em} บันทึกเรียบร้อย! ({lab.upper()} {sc:.0%})")
+            # ล้างข้อความหลังจากบันทึก
+            st.session_state.entry_text = ""  # reset textarea
+            st.session_state.entry_date = datetime.now().date()  # reset date to today
         else:
             st.error("กรุณาใส่ข้อความก่อนบันทึก")
 
-# Right: Tabs
+    st.button("💾 บันทึกและวิเคราะห์", on_click=on_new_save)
+
+# ─── RIGHT ──────────────────────────────────────────────────────────
 with col2:
-    df = load_data()
     if df.empty:
-        st.info("ยังไม่มีบันทึก ลองเพิ่มไดอารี่ก่อน")
+        st.info("ยังไม่มีบันทึกเลย ลองเพิ่มดูสิ")
     else:
-        tab1, tab2, tab3 = st.tabs(["Summary","Calendar","Stats"])
-        
-        st.markdown("---")
-        st.download_button(
-        label="📥 ดาวน์โหลดบันทึกทั้งหมด (CSV)",
-        data=df.reset_index().to_csv(index=False).encode('utf-8'),
-        file_name='mood_diary.csv',
-         mime='text/csv'
-)
+        tab1, tab2, tab3 = st.tabs(["Summary", "Calendar", "Stats"])
 
-
-        # Summary w/ edit
+        # ── Summary ───────────────────────────────
         with tab1:
-            st.subheader("บันทึกล่าสุด")
-            recent = df.reset_index().tail(5)[["date","text","emoji","score"]]
-            recent["score"] = recent["score"].apply(lambda x: f"{x:.0%}")
-            st.table(recent)
+            st.subheader("📝 บันทึกย้อนหลัง (ใหม่ → เก่า)")
+            df2 = df.sort_values("date", ascending=False).reset_index(drop=True)
+            if "edit_id" not in st.session_state:
+                st.session_state.edit_id = None
 
-            st.markdown("---")
-            st.subheader("✏️ แก้ไขไดอารีย้อนหลัง & Emoji")
-            edit_date = st.date_input(
-                "เลือกวันที่จะแก้ไข",
-                value=recent["date"].iloc[-1].date(),
-                min_value=recent["date"].min().date(),
-                max_value=recent["date"].max().date()
-            )
-            # load old
-            old_row = df.loc[pd.to_datetime(edit_date)]
-            new_text = st.text_area("ข้อความใหม่", value=old_row["text"], height=150)
-            # sentiment override?
-            new_sent = st.selectbox(
-                "อัปเดต Sentiment",
-                ["pos","neu","neg"],
-                index=["pos","neu","neg"].index(old_row["sentiment"])
-            )
-            # emoji override
-            new_emoji = st.selectbox(
-                "อัปเดต Emoji",
-                EMOJI_OPTIONS,
-                index=EMOJI_OPTIONS.index(old_row["emoji"]) if old_row["emoji"] in EMOJI_OPTIONS else 0
-            )
-            if st.button("💾 บันทึกการแก้ไข"):
-                # if sentiment changed, you might re-run analysis or keep override
-                # here we trust new_sent and new_emoji
-                _, new_score = analyze_sentiment(new_text)
-                save_entry(edit_date, new_text, new_sent, new_score, emoji=new_emoji)
-                st.success(f"{new_emoji} อัปเดตเรียบร้อย! ({new_sent.upper()} {new_score:.0%})")
-                st.rerun()
-            
-            if st.button("🗑️ ลบบันทึกนี้"):
-                df = df.reset_index()
-                df = df[df["date"] != pd.to_datetime(edit_date)]
-                df.to_csv(DATA_FILE, index=False)
-                st.success("ลบบันทึกเรียบร้อยแล้ว")
-                st.rerun()
+            for _, row in df2.iterrows():
+                c1, c2, c3, c4, c5, c6 = st.columns([1.3, 4, 1, 1, 1, 0.6])
+                c1.write(str(row["date"]))
+                c2.write(row["text"])
+                c3.write(row["emoji"])
+                c4.write(f"{row['score']:.0%}")
+                c5.write(row["sentiment"].upper())
+                c6.button("✏️", key=f"edit_{row['id']}", on_click=toggle_edit, args=(row["id"],))
+
+            if st.session_state.edit_id:
+                st.markdown("---")
+                old = df[df["id"] == st.session_state.edit_id].iloc[0]
+                st.subheader("🔄 แก้ไขบันทึกย้อนหลัง")
+                new_text = st.text_area("ข้อความใหม่", old["text"], height=150)
+
+                def on_apply_edit():
+                    lab, sc = analyze_sentiment(new_text)
+                    em = EMOJI_MAP[lab]
+                    save_entry(old["date"], new_text, lab, sc, em)
+                    st.success(f"{em} แก้ไขเรียบร้อย! ({lab.upper()} {sc:.0%})")
+                    st.session_state.edit_id = None
+                    st.session_state.should_rerun = True  # ✅ ตั้ง flag
+
+                # ปุ่มกดอยู่นอกฟังก์ชัน
+                st.button("💾 บันทึกการแก้ไข", on_click=on_apply_edit, key=f"save_{old['id']}")
 
 
-        # Calendar
+                def on_apply_delete():
+                    delete_entry(old["id"])
+                    st.success("🗑️ ลบบันทึกเรียบร้อยแล้ว")
+                    st.session_state.edit_id = None
+                    st.rerun()
+                st.button("🗑️ ลบบันทึกนี้", on_click=on_apply_delete)
+
+        # ── Calendar ───────────────────────────────
         with tab2:
             st.subheader("📅 ปฏิทิน Mood")
-            month = st.selectbox("เดือน", list(range(1,13)), index=datetime.now().month-1)
-            year  = st.number_input("ปี", 2000, 2100, datetime.now().year)
-            cal = calendar.monthcalendar(year, month)
+            y = st.number_input("ปี", 2000, 2100, datetime.now().year)
+            m = st.selectbox("เดือน", list(range(1, 13)), index=datetime.now().month - 1)
+            cal = calendar.monthcalendar(y, m)
+            last_emo = df.groupby("date")["emoji"].last()
             table = []
             for week in cal:
                 row = []
@@ -178,39 +184,28 @@ with col2:
                     if d == 0:
                         row.append("")
                     else:
-                        dt = datetime(year, month, d)
-                        row.append(df.loc[dt,"emoji"] if dt in df.index else "")
+                        row.append(last_emo.get(datetime(y, m, d).date(), ""))
                 table.append(row)
-            st.table(pd.DataFrame(table, columns=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]))
+            st.table(pd.DataFrame(table, columns=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]))
 
-        # Stats
-        # ─── Stats ─────────────────────────────────────────────────────────────────────
+        # ── Stats ─────────────────────────────────
         with tab3:
-            st.subheader("📊 Mood & Sentiment (7 วันล่าสุด)")
-            cutoff = datetime.now() - timedelta(days=7)
-            recent7 = df[df.index >= cutoff]
-
-            # กราฟจำนวนของ Emoji และ Sentiment
-            st.bar_chart(recent7["emoji"].value_counts())
-            st.bar_chart(recent7["sentiment"].value_counts())
-
-            # ค่าเฉลี่ยคะแนนความรู้สึก
-            if not recent7.empty:
-                avg_score = recent7["score"].mean()
-                st.metric("🎯 คะแนนความรู้สึกเฉลี่ย", f"{avg_score:.0%}")
-
-                # อารมณ์ที่เกิดบ่อยที่สุด
-                most_common = recent7["sentiment"].value_counts().idxmax()
-                st.info(f"อารมณ์ที่เจอบ่อยที่สุดช่วงนี้คือ: **{EMOJI_MAP[most_common]} {most_common.upper()}**")
-
-                # กราฟแนวโน้มคะแนนอารมณ์
-                st.line_chart(recent7["score"])
-
-                # ข้อความช่วง 7 วัน
-                st.markdown("### 📅 ข้อความในช่วง 7 วันล่าสุด")
-                for dt, row in recent7.iterrows():
-                    st.markdown(
-                        f"- **{dt.date()}** {row['emoji']} ({row['sentiment'].upper()} {row['score']:.0%}) → {row['text']}"
-                    )
+            st.subheader("📊 สถิติอารมณ์ 7 วันล่าสุด")
+            cutoff = datetime.now().date() - timedelta(days=7)
+            recent = df[df["date"] >= cutoff]
+            if recent.empty:
+                st.warning("ยังไม่มีบันทึกในช่วง 7 วัน")
             else:
-                st.warning("ยังไม่มีบันทึกในช่วง 7 วันที่ผ่านมา")
+                st.bar_chart(recent["emoji"].value_counts())
+                st.bar_chart(recent["sentiment"].value_counts())
+                avg = recent["score"].mean()
+                st.metric("🎯 ค่าเฉลี่ยความรู้สึก", f"{avg:.0%}")
+                st.markdown("#### ✉️ ข้อความ 7 วัน")
+                for _, r in recent.sort_values("date").iterrows():
+                    st.markdown(
+                        f"- **{r['date']}** {r['emoji']} ({r['sentiment'].upper()} {r['score']:.0%}) → {r['text']}"
+                    )
+
+if st.session_state.get("should_rerun", False):
+    st.session_state.should_rerun = False  # reset
+    st.rerun()
