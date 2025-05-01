@@ -483,8 +483,18 @@ else:
 
         cal = calendar.monthcalendar(y, m)
         last_emo = df.groupby("date")["emoji"].last()
-        table = [[last_emo.get(datetime(y, m, d).date(), "") if d != 0 else "" for d in week] for week in cal]
-        st.table(pd.DataFrame(table, columns=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]))
+
+        table = [
+            [
+                f"{d}\n{last_emo.get(datetime(y, m, d).date(), '')}" if d != 0 else ""
+                for d in week
+            ]
+            for week in cal
+        ]
+        df_calendar = pd.DataFrame(table, columns=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+        df_calendar.index = [""] * len(df_calendar)
+
+        st.table(df_calendar)
 
     with tab3:
         st.markdown("<h2 class='summary-title'><span class='emoji'>📊</span> สถิติอารมณ์ 7 วันล่าสุด</h2>", unsafe_allow_html=True)
